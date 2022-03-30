@@ -1,0 +1,284 @@
+import pysftp
+import sys
+import socket
+import requests
+import json
+import time
+import os
+import pendulum
+import logging
+import shutil
+import paramiko
+import pandas as pd
+import psycopg2
+import requests
+import numpy as np
+import math
+import cx_Oracle
+import boto3
+import csv
+import ast
+
+from io import StringIO,BytesIO
+from dearpygui.core import *
+from dearpygui.simple import *
+from base64 import decodebytes
+from sqlalchemy import create_engine
+from datetime import datetime, timedelta, date
+from pyhive import presto
+
+# pip install auto-py-to-exe
+
+engine_presto =  presto.connect(host='**************',
+                port=************,
+                username='**************')
+
+cursor = engine_presto.cursor()
+
+local_tz = pendulum.timezone("US/Eastern")
+
+todayDate = datetime.now().strftime("%Y_%m_%d-%I:%M")
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("upload.log"),
+        logging.StreamHandler()
+    ]
+)
+
+def upload_presto(df,BUCKET,SCHEMA,TABLE_NAME,filename):
+    destination_path="{schema}/{table_name}/".format(schema=SCHEMA, table_name=TABLE_NAME)
+    file_buffer = BytesIO()
+    df.to_parquet(file_buffer,allow_truncated_timestamps=True)
+    
+    s3 = boto3.resource(
+    service_name='s3',
+    aws_access_key_id="*********************",
+    aws_secret_access_key="*********************",
+    endpoint_url ="http://**************")
+    
+    s3.Bucket(BUCKET).put_object(Key=destination_path+filename, Body=file_buffer.getvalue())
+
+def upload_file(sender, data):
+    BUCKET = "sandbox"
+    SCHEMA = "client1"
+    TABLE_NAME = "table1"
+    print(data)
+    print(data.replace("\\", "\\\\"))
+    tagging = pd.read_csv(data)
+    tagging.columns = map(str.upper, tagging.columns)
+    tagging[['QTY', 'ALLOCQTY','RANK_SKU','LOC_PER_CELL']] = tagging[['QTY','ALLOCQTY','RANK_SKU','LOC_PER_CELL']].fillna(value=0)
+    
+    #Get dataframe in right format
+    convert_dict = {'position': str,
+        'SKU': str,
+        'LOC': str,
+        'QTY': int,
+        'ALLOCQTY': int,
+        'RANK_SKU': int,
+        'LOC_PER_CELL': int,
+        'TYPE': str,
+        'PRIMARY_LOC_FOR_position/SKU': str                
+        } 
+
+    tagging_dict = tagging.astype(convert_dict) 
+    
+    # filename used to save in Minio
+    filename = 'Excel1_' + str(datetime.now())
+    tagging_dict['ADDTS'] = datetime.now()
+
+    upload_presto(tagging_dict,BUCKET,SCHEMA,TABLE_NAME,filename)
+    set_value("upload_status", 'Uploading...please wait !')
+    set_value("upload_status", 'File Upload Success')
+
+
+def download_file(sender, data):
+    sql_query = ''' SELECT * 
+    FROM sandbox.clinet1.table1
+    WHERE addts = ( SELECT MAX(addts) 
+                   FROM sandbox.client1.table1
+                 ) 
+    '''
+    
+    sql_data = pd.read_sql(sql_query,engine_presto)
+    cwd = os.getcwd()
+    path = cwd + r"/excel1"+datetime.now().strftime("%Y_%m_%d")+".csv"
+    sql_data.to_csv(path,index=False)
+    set_value("download_status", 'Downloading...please wait !')
+    set_value("download_status", 'File Download Success. File downloaded at {}'.format(path))
+
+
+def trigger_DAG(sender, data):
+
+    dag_id = data
+
+    url = r'http://*******************/dags/{}/dag_runs'.format(
+        dag_id)
+
+    payload = {
+        "dag_id": dag_id,
+        "run_id": "manual__{}".format(datetime.now().isoformat()),
+        "start_date": datetime.now().isoformat(),
+        "state": "success"
+    }
+
+    r = requests.post(url=url, json=payload)
+
+    result = r.content.decode('utf-8')
+
+    if 'Created' in result:
+        set_value(
+            "dag_run", "Summary will be shared through the mail.")
+
+        res = ''
+        while res != 'SUCCESS':
+
+            res = DAG_status(sender, data)
+            set_value('dag_status', res)
+
+            time.sleep(2)
+
+    elif 'already' in result:
+        set_value(
+            "dag_run", "Process was already run for the day. Connect with Varun Pillai if you want to run again.")
+
+        res = DAG_status(sender, data)
+        set_value('dag_status', res)
+        
+
+def DAG_status(sender, data):
+
+    dag_id = data
+
+    url = r'http://*****************************/dags/{}/dag_runs'.format(
+        dag_id)
+
+    r = requests.get(url=url)
+
+    run_id = "manual__{}".format(datetime.now().replace(
+        hour=0, minute=0, second=0, microsecond=0).isoformat())
+
+    result = json.loads(r.content.decode('utf-8'))
+
+    res = [x['state'] if x['run_id'] == run_id else '' for x in result]
+    res = ''.join(res).upper()
+
+    return res
+
+
+def VPN_status():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        result = sock.connect_ex(('*************************', ****))
+    except:
+        result = 1
+    if result == 0:
+        return True
+    else:
+        return False
+
+
+def file_picker(sender, data):
+    open_file_dialog(callback=apply_selected_file, extensions=".csv")
+
+
+l = []
+def data_add(x):
+    l.append(x)
+
+
+def save_choice():
+    BUCKET = "sandbox"
+    SCHEMA = "client1"
+    TABLE_NAME = "active_position_picktype"
+    filename = 'position_Active_' + str(datetime.now())
+    
+    dict_position = {
+        'Position_1':str(get_value('Position_1')),
+        'Position_2':str(get_value('Position_2')),
+        'Position_3':str(get_value('Position_3')),
+        'addts':datetime.now()
+    }
+    df = pd.DataFrame(dict_position,index=[0])
+    upload_presto(df,BUCKET,SCHEMA,TABLE_NAME,filename)
+
+
+def currently_active():
+    sql_query = ''' SELECT * 
+    FROM sandbox.client1.active_position_picktype
+    WHERE addts = ( SELECT MAX(addts) 
+                   FROM sandbox.client1.active_position_picktype
+                 ) 
+    ORDER BY addts desc
+    limit 1
+    '''
+    sql_data = pd.read_sql(sql_query,engine_presto)
+    sql_data.columns = map(str.upper, sql_data.columns)
+    return(sql_data)
+    
+
+def apply_selected_file(sender, data):
+    log_debug(data)  # so we can see what is inside of data
+    directory = data[0]
+    file = data[1]
+    set_value("directory", directory)
+    set_value("file", file)
+    set_value("file_path", os.path.join(directory, file))
+
+
+if __name__ == '__main__':
+    
+    dag_id = 'dag_name'
+    vpn = VPN_status()
+    active_position = currently_active()
+    set_main_window_size(5000, 5000)
+    set_main_window_title('Windoq title 1')
+
+    with window("Main", width=800, height=550):
+        with tab_bar("Tab Bar##widget"):
+            with tab("Update Primary##widget"):
+                if vpn:
+                    add_text("VPN Status :  Connected", color=[0, 255, 0])
+                else:
+                    add_text("VPN Status :  Not Connected", color=[255, 0, 0])
+                    add_text("Connect to VPN and restart this application.")
+
+                if vpn:
+                    add_button("Download File",
+                               callback=download_file)
+                    add_same_line()
+                    add_label_text("    ", source="download_status",
+                                   color=[0, 255, 0])
+                    
+                    add_button("Select File",
+                               callback=file_picker)
+                    add_same_line()
+                    add_label_text("", source="file_path", color=[0, 255, 0])
+
+                    add_button("Upload File", callback=upload_file,
+                               callback_data=lambda: (get_value("file_path")))
+                    add_same_line()
+                    add_label_text("      ", source="upload_status",
+                                   color=[0, 255, 0])
+                    
+                    add_button("Share Summary", callback=trigger_DAG,
+                               callback_data=dag_id)
+                    add_label_text("     ", source="dag_run", color=[0, 255, 0])                    
+
+            with tab("Freeze position & Picktypes##widget"):
+                if vpn:
+                    add_text("VPN Status :  Connected", color=[0, 255, 0])
+                else:
+                    add_text("VPN Status :  Not Connected", color=[255, 0, 0])
+                    add_text("Connect to VPN and restart this application.")
+
+                if vpn:
+                    add_text("Positions currently active :")
+                    add_checkbox("Position_1", default_value=ast.literal_eval(active_positions.iloc[0]['Position_1']))
+                    add_checkbox("Position_2", default_value=ast.literal_eval(active_positions.iloc[0]['Position_2']))
+                    add_checkbox("Position_3", default_value=ast.literal_eval(active_positions.iloc[0]['Position_3']))
+                    add_button("Save position",callback= save_choice)
+
+    start_dearpygui()
