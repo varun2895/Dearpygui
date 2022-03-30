@@ -3,6 +3,6 @@ Dear PyGui is an easy-to-use, dynamic, GPU-Accelerated, cross-platform graphical
 
 # Purpose
 
-Created an front end application to help the team to run the DAG process directly
+Created a front end application to help the team to run the Airflow DAGs process directly
 
 ![image](https://user-images.githubusercontent.com/39857587/160808713-54f75bb4-b993-46e8-8cb9-0c9e05f84c17.png)
